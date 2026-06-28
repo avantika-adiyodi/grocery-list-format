@@ -28,8 +28,6 @@ What it does:
     4. Copies the final result to your clipboard and prints it.
 """
 
-import sys
-
 try:
     import pyperclip
     CLIPBOARD_AVAILABLE = True
@@ -66,40 +64,98 @@ def row_to_cells(line):
     return [c.strip() for c in line.split("\t") if c.strip() != ""]
 
 
+def row_to_body_tokens(line):
+    """Split one BODY line into tokens, same as row_to_cells but also
+    breaking apart already-formatted single-line items like:
+        '1 | Beans HARICOT - 250 gm #'
+    into ['1', '|', 'Beans HARICOT', '-', '250 gm', '#'].
+
+    This is needed because a line like that has no tabs, so a plain
+    tab-split would leave it as one giant cell and parse_items would
+    never see a standalone '#' token to close the item out.
+
+    We only split on '|' and '#' here (always safe -- these never
+    legitimately appear inside an item name/quantity in this format).
+    We deliberately do NOT split every '-' here, since item names can
+    contain hyphens (e.g. 'Harpic - blue normal medium size'); the
+    existing last-dash-wins logic in format_item already handles that
+    correctly as long as '-' surrounded by spaces becomes its own
+    token. We split on ' - ' (dash with spaces on both sides) which
+    covers both the field separator and safely leaves things like
+    '100gms' or hyphenated words without spaces intact.
+    """
+    cells = row_to_cells(line) # split based on tab ("\t")
+    tokens = []
+    for cell in cells:
+        # First split out '|' and '#' as their own tokens.
+        parts = [cell]
+        for sep in ("|", "#"):
+            new_parts = []
+            for part in parts:
+                pieces = part.split(sep)
+                for j, piece in enumerate(pieces):
+                    piece = piece.strip()
+                    if piece != "":
+                        new_parts.append(piece)
+                    if j != len(pieces) - 1:
+                        new_parts.append(sep)
+            parts = new_parts
+        # Now split each remaining part on ' - ' (dash with spaces)
+        # to separate name from quantity in already-formatted lines,
+        # without breaking hyphens that have no surrounding spaces.
+        final_parts = []
+        for part in parts:
+            if part in ("|", "#"):
+                final_parts.append(part)
+                continue
+            segments = part.split(" - ")
+            for k, segment in enumerate(segments):
+                segment = segment.strip()
+                if segment != "":
+                    final_parts.append(segment)
+                if k != len(segments) - 1:
+                    final_parts.append("-")
+        tokens.extend(final_parts)
+    return tokens
+
+
 def split_header_and_body_rows(raw_text):
     """Split the raw text into header ROWS (list of cell-lists, before
     the first ```) and body tokens (flattened, between the ``` fences).
-    Keeping rows intact for the header lets us know exactly which cells
-    belong to the Date/Address line vs. the next line."""
-    rows = [row_to_cells(line) for line in raw_text.splitlines()]
-    rows = [r for r in rows if r]  # drop fully empty rows
 
-    fence_row_idx = None
-    for idx, row in enumerate(rows):
-        if row and row[0] == "```":
-            fence_row_idx = idx
-            break
+    Header rows keep using plain tab/cell splitting, since header text
+    shouldn't be broken apart on '|', '-', or '#'.
 
-    if fence_row_idx is None:
+    Body lines use row_to_body_tokens, since item lines might arrive
+    already-formatted on a single line (e.g. '1 | Rice - 5 kg #') and
+    need to be broken apart into individual tokens to be re-parsed.
+    """
+    original_lines = raw_text.splitlines()
+
+    fence_line_indices = [
+        idx for idx, line in enumerate(original_lines)
+        if line.strip() == "```"
+    ]
+
+    if not fence_line_indices:
+        rows = [row_to_cells(line) for line in original_lines]
+        rows = [r for r in rows if r]
         return rows, []
 
-    header_rows = rows[:fence_row_idx]
+    first_fence_line = fence_line_indices[0]
+    header_lines = original_lines[:first_fence_line]
+    header_rows = [row_to_cells(line) for line in header_lines]
+    header_rows = [r for r in header_rows if r]
 
-    # Find the matching closing fence row (last row that is just ```)
-    closing_idx = None
-    for idx in range(len(rows) - 1, fence_row_idx, -1):
-        if rows[idx] and rows[idx][0] == "```":
-            closing_idx = idx
-            break
-
-    if closing_idx is not None:
-        body_rows = rows[fence_row_idx + 1:closing_idx]
+    if len(fence_line_indices) >= 2:
+        last_fence_line = fence_line_indices[-1]
+        body_lines = original_lines[first_fence_line + 1:last_fence_line]
     else:
-        body_rows = rows[fence_row_idx + 1:]
+        body_lines = original_lines[first_fence_line + 1:]
 
     body_tokens = []
-    for row in body_rows:
-        body_tokens.extend(row)
+    for line in body_lines:
+        body_tokens.extend(row_to_body_tokens(line))
 
     return header_rows, body_tokens
 
