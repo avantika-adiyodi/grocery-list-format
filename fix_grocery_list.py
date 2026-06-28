@@ -179,7 +179,28 @@ def clean_header(header_rows):
     def is_address_label(cell):
         return cell.strip().lower() in ("*address*", "*address*:", "address", "address:")
 
-    out = []
+    def is_any_label(row):
+        return bool(row) and (is_date_label(row[0]) or is_address_label(row[0]))
+
+    def extract_field(rows, start, output_label):
+        """Consume the label row at `start` (and, if its value is
+        empty, look ahead for a ':' row and/or one value row) and
+        return (formatted line, next index to resume from)."""
+        row = rows[start]
+        value_cells = [cell for cell in row[1:] if cell != ":"]
+        i = start + 1
+
+        if not value_cells and i < len(rows):
+            if rows[i] == [":"]:
+                i += 1
+            if i < len(rows) and not is_any_label(rows[i]):
+                value_cells = [cell for cell in rows[i] if cell != ":"]
+                i += 1
+
+        value = " ".join(value_cells).strip()
+        return f"{output_label} {value}".strip(), i
+
+    output_lines = []
     i = 0
     n = len(header_rows)
 
@@ -187,57 +208,16 @@ def clean_header(header_rows):
         row = header_rows[i]
 
         if row and is_date_label(row[0]):
-            value_cells = [c for c in row[1:] if c != ":"]
+            line, i = extract_field(header_rows, i, "Date:")
+            output_lines.append(line)
+        elif row and is_address_label(row[0]):
+            line, i = extract_field(header_rows, i, "*Address*:")
+            output_lines.append(line)
+        else:
+            output_lines.append(" ".join(row))
             i += 1
-            # If no value on this row, look at the next row(s): skip a
-            # lone ':' row, then take the next non-empty row as the value.
-            if not value_cells and i < n:
-                if header_rows[i] == [":"]:
-                    i += 1
-                if i < n and not (is_date_label(header_rows[i][0]) if header_rows[i] else False) \
-                        and not (is_address_label(header_rows[i][0]) if header_rows[i] else False):
-                    value_cells = [c for c in header_rows[i] if c != ":"]
-                    i += 1
-            value = " ".join(value_cells).strip()
-            out.append(f"Date: {value}".strip())
-            continue
 
-        if row and is_address_label(row[0]):
-            value_cells = [c for c in row[1:] if c != ":"]
-            i += 1
-            if not value_cells and i < n:
-                if header_rows[i] == [":"]:
-                    i += 1
-                if i < n and not (is_date_label(header_rows[i][0]) if header_rows[i] else False) \
-                        and not (is_address_label(header_rows[i][0]) if header_rows[i] else False):
-                    value_cells = [c for c in header_rows[i] if c != ":"]
-                    i += 1
-            value = " ".join(value_cells).strip()
-            out.append(f"*Address*: {value}".strip())
-            continue
-
-        out.append(" ".join(row))
-        i += 1
-
-    return out
-
-
-def parse_items(body_tokens):
-    """Group body tokens into individual items. Each item is a run of
-    tokens ending in '#'. The first token of an item is always the
-    serial number, which lets us realign cleanly."""
-    items = []
-    current_item = []
-
-    for token in body_tokens:
-        current_item.append(token)
-        if token == "#":
-            items.append(current_item)
-            current_item = []
-
-    # Drop any trailing incomplete item (e.g. a lone leftover serial
-    # number with nothing filled in) -- nothing useful to print there.
-    return items
+    return output_lines
 
 
 def format_item(tokens):
@@ -279,19 +259,29 @@ def format_item(tokens):
     return f"{slno} | {name} #"
 
 
-def build_output(header_lines, items):
-    out_lines = []
-    out_lines.extend(header_lines)
-    out_lines.append("")  # exactly one blank line between header and list
-    out_lines.append("```")
+def build_output(header_lines, body_tokens):
+    """Assemble the final output: header, one blank line, then the
+    fenced item list. Body tokens are grouped into individual items
+    (each a run of tokens ending in '#') and formatted as we go 
+    ("turn tokens into output lines")."""
+    output_lines = []
+    output_lines.extend(header_lines)
+    output_lines.append("")  # exactly one blank line between header and list
+    output_lines.append("```")
 
-    for tokens in items:
-        formatted = format_item(tokens)
-        if formatted:
-            out_lines.append(formatted)
+    current_item = []
+    for tok in body_tokens:
+        current_item.append(tok)
+        if tok == "#":
+            formatted = format_item(current_item)
+            if formatted:
+                output_lines.append(formatted)
+            current_item = []
+    # Any leftover tokens that never reached a closing '#' (e.g. a lone
+    # trailing serial number with nothing filled in) are simply dropped.
 
-    out_lines.append("```")
-    return "\n".join(out_lines)
+    output_lines.append("```")
+    return "\n".join(output_lines)
 
 
 def copy_to_clipboard(text):
@@ -315,8 +305,7 @@ def main():
 
     header_rows, body_tokens = split_header_and_body_rows(raw_text)
     header_lines = clean_header(header_rows)
-    items = parse_items(body_tokens)
-    output = build_output(header_lines, items)
+    output = build_output(header_lines, body_tokens)
 
     print("\n" + "=" * 50)
     print("CLEANED OUTPUT:")
